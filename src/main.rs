@@ -10,10 +10,11 @@ use std::{
         JoinHandle,
         self,
     },
-    io::{ Cursor, Read },
+    io::{ Cursor, Read, Write },
     //ops::Drop,
     time::Duration,
     //collections::HashMap,
+    fmt::{ Display, Formatter },
 };
 use tiny_http::{
     Server,
@@ -108,8 +109,11 @@ fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool) -> R
                     request.respond(response);
                     continue;
                 }                    
-                let mut stream = request.upgrade("websocket", response);
-                let job = Box::new(move || handle_ws(Stream::new(stream)));
+                let mut stream = Stream::new(
+                    request.upgrade("websocket", response),
+                    Duration::from_secs(5)
+                );
+                let job = Box::new(move || handle_ws(stream));
                 pool2.execute(job);
             } 
         });
@@ -130,8 +134,15 @@ impl Worker {
         let handle = thread::spawn(move || loop {
             let res = rx.lock().unwrap().recv();
             match res {
-                Ok(job) => {println!("Worker {} executing job", id); job(); println!("Worker {} done", id);}
-                Err(_) => {println!("Worker {} shutting down", id); break;}
+                Ok(job) => {
+                    println!("Worker {} executing job", id); 
+                    job(); 
+                    println!("Worker {} done", id);
+                }
+                Err(_) => {
+                    println!("Worker {} shutting down", id); 
+                    break;
+                }
             }
         });
         Worker { 
@@ -274,30 +285,43 @@ fn handle_ws(mut stream: Stream) {
         });
     });*/
     loop {
-        let control_byte: u8 = stream.read(1).expect("Could not get stream control content")[0];
-        println!("{:?}", control_byte);
-        let c_bits1 = into_bits(control_byte);
-        let fin = c_bits1[0];
-        let opcode = Opcode::from(from_bits(&c_bits1[3..8]));
-        let content = stream.get_content(); 
-        match opcode {
+        let frame = stream.get_frame(); 
+        //let control_bits = into_bits(byte1);
+        //let fin = control_bits[0];
+        //let opcode = Opcode::from(from_bits(&control_bits[3..8]));
+        let content = frame.bytes();
+        match frame.opcode() {
             Fragment => println!("fragment"),
-            Text | Binary => println!("data"),
-            Close => println!("close"),
-            Ping => println!("ping"),
-            Pong => println!("pong"),
-            Unknown(n) => println!("Unknown: {n}")
+            Text => {
+                let text = frame.text().expect("Those bastards lied about UTF-8");
+                println!("{}", text);
+            }
+            Binary => println!("data"),
+            Close => {
+                println!("Closing");
+                break;
+            },
+            Ping => {
+                println!("Received Ping; responding");
+                stream.pong(&content, 1024);
+            },
+            Pong => println!("Received Pong: {:?}", content),
+            Unknown => println!("Unknown")
         }
+        stream.ping("pog".as_bytes());
+        thread::sleep(Duration::from_secs(1));
     }
 }
+#[derive(Copy, Clone)]
+#[non_exhaustive]
 enum Opcode {
-    Fragment,
-    Text,
-    Binary,
-    Close,
-    Ping,
-    Pong,
-    Unknown(u8),
+    Fragment = 0,
+    Text = 1,
+    Binary = 2,
+    Close = 8,
+    Ping = 9,
+    Pong = 10,
+    Unknown = 16,
 }
 impl From<u8> for Opcode {
     fn from(value: u8) -> Self {
@@ -308,40 +332,122 @@ impl From<u8> for Opcode {
             8 => Self::Close,
             9 => Self::Ping,
             10 => Self::Pong,
-            n => Self::Unknown(n)
+            _ => Self::Unknown
         }
     }
 }
+impl Display for Opcode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let display = match self {
+            Self::Fragment => "Fragment",
+            Self::Text => "Text",
+            Self::Binary => "Binary", 
+            Self::Close => "Close", 
+            Self::Ping => "Ping", 
+            Self::Pong => "Pong", 
+            Self::Unknown => "Unknown", 
+        };
+        write!(f, "{display}")
+    }
+}
+struct Frame {
+    fin: bool,
+    rsv1: bool,
+    rsv2: bool,
+    rsv3: bool,
+    opcode: Opcode,
+    mask: Option<Vec<u8>>,
+    content: Vec<u8>
+}
+impl Frame {
+    fn new(fin: bool, rsv1: bool, rsv2: bool, rsv3: bool, opcode: Opcode, mask: Option<Vec<u8>>, content: Vec<u8>) -> Frame {
+        Frame {
+            fin: fin,
+            rsv1: rsv1,
+            rsv2: rsv2,
+            rsv3: rsv3,
+            opcode: opcode,
+            mask: mask,
+            content: content
+        }
+    }
+    fn fin(&self) -> bool {
+        self.fin
+    }
+    fn rsv1(&self) -> bool {
+        self.rsv1
+    }
+    fn rsv2(&self) -> bool {
+        self.rsv2
+    }
+    fn rsv3(&self) -> bool {
+        self.rsv3
+    }
+    fn opcode(&self) -> Opcode {
+        self.opcode
+    }
+    fn mask(&self) -> &Option<Vec<u8>> {
+        &self.mask
+    }
+    fn bytes(&self) -> Vec<u8> {
+        self.content.to_vec()
+    }
+    fn text(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.bytes())
+    }
+    fn content_len(&self) -> u64 {
+        self
+            .bytes()
+            .len()
+            .try_into()
+            .expect("Math ain't mathing: III")
+    }
+}
+impl Display for Frame {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "Frame(fin: {}, rsv1: {}, rsv2: {}, rsv3: {}, opcode: {}, mask: {:?}, content: {:?})", self.fin, self.rsv1, self.rsv2, self.rsv3, self.opcode, self.mask, self.content)
+    }
+}
 struct Stream { 
-    inner: Socket
+    inner: Socket,
+    timeout: Duration
 }
 impl Stream {
-    fn new(stream: Socket) -> Self {
-        Stream {inner: stream}
+    fn new(stream: Socket, timeout: Duration) -> Self {
+        Stream {
+            inner: stream, 
+            timeout: timeout
+        }
     }
     fn inner(&mut self) -> &mut Socket {
         &mut self.inner
     }
-    fn get_content(&mut self) -> Vec<u8> {
-        let control_byte: u8 = self.read(1).expect("Could not get stream control content")[0];
-        let c_bits2 = into_bits(control_byte);
-        let is_masked = c_bits2[0]; 
-        let len = from_bits(&c_bits2[1..8]);
-        let real_len: u32;
+    fn get_frame(&mut self) -> Frame {
+        let control_bytes: Vec<u8> = self.read(2).expect("Could not get stream control content");
+        let control_bits1 = into_bits(control_bytes[0]);
+        let fin = control_bits1[0];
+        let rsv1 = control_bits1[1];
+        let rsv2 = control_bits1[2];
+        let rsv3 = control_bits1[3];
+        let opcode = Opcode::from(from_bits(&control_bits1[4..8]));
+        let control_bits2 = into_bits(control_bytes[1]);
+        let is_masked = control_bits2[0]; 
+        let len = from_bits(&control_bits2[1..8]);
+        let real_len: u64;
         let len_len: u8 = match len {
             0..126 => 0,
             126 => 2,
-            127 => 4,
+            127 => 8,
             _ => unreachable!("len > 127")
         };
         if len_len == 0 {
-            real_len = len as u32; 
+            real_len = len as u64; 
         } else {
-            let len_bytes: Vec<u8> = self.read(len_len as u32).expect("Could not get stream control content");
-            let mut buf: u32 = 0;
+            let len_bytes: Vec<u8> = self.read(len_len as u64).expect("Could not get stream control content");
+            let mut buf: u64 = 0;
             for i in 0..len_len {
                 let shift = (len_len - i - 1) * 8;
-                buf += (len_bytes[i as usize] as u32) << shift as u32;
+                buf += (len_bytes[i as usize] as u64) << shift as u64;
             }
             real_len = buf;
         }
@@ -353,15 +459,14 @@ impl Stream {
             },
         };
         let mut content = self.read(real_len).expect("Could not get stream control content");
-        if let Some(key) = mask { 
+        if let Some(key) = &mask { 
             for i in 0..content.len() {
                 content[i] = content[i] ^ key[i % 4];
             }
         }
-        println!("Content: {:?}", content);
-        content
+        Frame::new(fin, rsv1, rsv2, rsv3, opcode, mask, content)
     }
-    fn read(&mut self, bytes: u32) -> Result<Vec<u8>, String> {
+    fn read(&mut self, bytes: u64) -> Result<Vec<u8>, String> {
         if bytes == 0 {
             return Ok(Vec::<u8>::new());
         }
@@ -374,6 +479,58 @@ impl Stream {
             Ok(n) => Ok(buf),
             Err(err) => Err(err.to_string())
         }
+    }
+    fn pong(&mut self, content: &[u8], limit: u64) {
+        if content.len() <= limit as usize {
+            let mut byte2 = 0x00;
+            let (len_len, len) = set_len(content.len().try_into().expect("Math ain't mathing again"));
+            byte2 |= len_len;
+            self.write_all(&[0x8A, byte2]);
+            self.write_all(len.as_slice());
+            self.write_all(content);
+            self.flush();
+        }
+    }
+    fn ping(&mut self, content: &[u8]) {
+        let (len_len, len) = set_len(content.len().try_into().expect("Math ain't mathing again"));
+        let mut byte2 = 0x00;
+        byte2 |= len_len;
+        self.write_all(&[0x89, byte2]);
+        self.write_all(len.as_slice());
+        self.write_all(content);
+        self.flush();
+        println!("Sent Ping: {:?}", content);
+        let frame = self.get_frame();
+        if let Pong = frame.opcode() {
+            println!("Received Pong: {:?}", frame.bytes());
+        } else {
+            println!("Received other frame: {}", frame);
+        }
+    }
+    fn close_frame(mut self, mut frame: Frame) {
+        frame.mask = None;
+        self.write_frame(frame);
+    }
+    fn close(mut self, content: &[u8]) {
+        
+    }
+    fn write_frame(&mut self, frame: Frame) {
+        let mut byte1: u8 = 0;
+        byte1 |= from_bits(&[frame.fin(), frame.rsv1(), frame.rsv2(), frame.rsv3()]) << 4;
+        byte1 |= frame.opcode() as u8;
+        println!("{byte1}");
+        let mut byte2: u8 = 0;
+        byte2 |= (frame.fin() as u8) << 7;
+        let (len_len, len) = set_len(frame.content_len());
+        //byte2 |= 
+    }
+}
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner().flush()
     }
 }
 
@@ -398,7 +555,11 @@ fn from_bits(bits: &[bool]) -> u8 {
     }
     byte
 }
-/*fn from_bytes<T: From<u8>>(bytes: Vec<u8>) /* -> Result<T, ()>*/ {
-    let mut int: T = 0.into();
-        
-}*/
+fn set_len(size: u64) -> (u8, Vec<u8>) {
+    let (len_len, len): (u8, Vec<u8>) = match size {
+        0..126 => (size.try_into().expect("Math ain't mathing"), Vec::new()),
+        126..=65535 => (126, size.to_be_bytes().to_vec()),
+        _ => (127, size.to_be_bytes().to_vec())
+    };
+    (len_len, len)
+}
