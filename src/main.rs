@@ -9,6 +9,7 @@ use std::{
         Arc,
         Mutex,
     },
+    collections::HashMap,
 };
 use local_ip_address::local_ip;
 //use getch_rs::{ Getch, Key::* };
@@ -22,6 +23,9 @@ use server::Server::{
     Opcode::*,
 };
 
+pub mod game;
+use game::game::*;
+
 fn main() {
     let ip_port_res = args();
     let (ip, port) = match ip_port_res {
@@ -31,6 +35,12 @@ fn main() {
     println!("Press CONTROL-C to exit");
     let server_tp = ThreadPool::new(10, Some(10)).unwrap();
     let ws_tp = ThreadPool::new(0, None).unwrap();
+    let mut player = Player::new(Character::ElGringo, Role::Sheriff, None);
+    let mut deck = HashMap::from([
+        (Card::Bang, 3u8),
+        (Card::Miss, 5u8)
+    ]);
+    player.pull_card(&mut deck);
     run_server(ip, port, server_tp, ws_tp);
     /*thread::scope(|s| {
         s.spawn(move || {*/
