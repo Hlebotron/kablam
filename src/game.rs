@@ -46,9 +46,9 @@ pub mod game {
         pub fn attr_num(&self) -> &HashMap<AttrNum, usize> {
             &self.attributes_num
         }
-        pub fn rm_attr(&mut self, attr: &Attribute) -> bool {
+        /*pub fn rm_attr(&mut self, attr: &Attribute) -> bool {
             self.attributes.remove(attr) 
-        }
+        }*/
         pub fn has_attr(&self, attr: &Attribute) -> bool {
             self.attributes.contains(attr)
         }
@@ -68,7 +68,23 @@ pub mod game {
             }
         }
         pub fn rm_attr_num(&mut self, attr: &AttrNum) -> Option<usize> {
-            self.attributes_num.remove(attr) 
+            let attrs = &mut self.attributes_num;
+            let mut count = attrs.get_mut(&attr)?;
+            if *count > 0 {
+                *count -= 1; 
+            }
+            if *count == 0 {
+                attrs.remove(&attr)?;
+                return Some(0);
+            }
+            Some(*count)
+        }
+        pub fn rm_attr(&mut self, attr: &Attribute) -> bool {
+            let from_res = AttrNum::try_from(attr);
+            match from_res {
+                Err(_) => self.attributes.remove(attr),
+                Ok(attr_num) => self.rm_attr_num(&attr_num).is_some()
+            }
         }
         pub fn has_attr_num(&self, attr: &AttrNum) -> bool {
             self.attributes_num.contains_key(attr)
@@ -290,7 +306,7 @@ pub mod game {
         SecondPullShowGamble,
     }
     #[repr(u8)]
-    #[derive(Eq, Hash, PartialEq)]
+    #[derive(Eq, Hash, PartialEq, Debug)]
     pub enum AttrNum {
         ExtraRange,
         ExtraDistance,
@@ -404,15 +420,15 @@ pub mod game {
             }
         }
     }
-    impl TryFrom<&Attribute> for AttrNum {
-        type Error = ();
-        fn try_from(value: &Attribute) -> Result<Self, Self::Error> {
+    impl<'a> TryFrom<&'a Attribute> for AttrNum {
+        type Error = &'a Attribute;
+        fn try_from(value: &'a Attribute) -> Result<Self, Self::Error> {
             use Attribute::*;
             match value {
                 Barrel => Ok(Self::Barrel),
                 ExtraRange => Ok(Self::ExtraRange),
                 ExtraDistance => Ok(Self::ExtraDistance),
-                _ => Err(())
+                val => Err(val)
             }
         }
     }
@@ -492,9 +508,14 @@ mod tests {
         assert!(player.attr().len() == 1);
         assert!(player.attr_num().len() == 1);
 
+        player.add_attr(ExtraRange);
+        assert!(player.attr().len() == 1);
+        assert!(player.attr_num().len() == 1);
+
         player.add_attr(ExtraDistance);
         assert!(player.attr().len() == 1);
         assert!(player.attr_num().len() == 2);
+
         {
             let res = player.rm_attr(&Dynamite);
             assert!(player.attr().len() == 1);
@@ -504,6 +525,19 @@ mod tests {
             let res = player.rm_attr(&Jailed);
             assert!(player.attr().len() == 0);
             assert!(player.attr_num().len() == 2);
+            assert!(res == true);
+        }{ 
+            dbg!(player.attr_num());
+            let res = player.rm_attr(&ExtraRange);
+            dbg!(player.attr_num());
+            assert!(player.attr().len() == 0);
+            assert!(player.attr_num().len() == 2);
+            assert!(res == true);
+        }{ 
+            let res = player.rm_attr(&ExtraRange);
+            dbg!(player.attr_num());
+            assert!(player.attr().len() == 0);
+            assert!(player.attr_num().len() == 1);
             assert!(res == true);
         }
     }
@@ -525,5 +559,4 @@ mod tests {
             player2.upper_hand().len() > 0
         );
     }
-
 }
