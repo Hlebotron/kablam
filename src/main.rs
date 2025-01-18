@@ -23,6 +23,8 @@ use server::Server::{
     Opcode::*,
 };
 
+pub mod setup;
+
 pub mod game;
 use game::game::*;
 
@@ -35,12 +37,6 @@ fn main() {
     println!("Press CONTROL-C to exit");
     let server_tp = ThreadPool::new(10, Some(10)).unwrap();
     let ws_tp = ThreadPool::new(0, None).unwrap();
-    let mut player = Player::new(Character::ElGringo, Role::Sheriff, None);
-    let mut deck = HashMap::from([
-        (Card::Bang, 3u8),
-        (Card::Miss, 5u8)
-    ]);
-    player.pull_card(&mut deck);
     run_server(ip, port, server_tp, ws_tp);
     /*thread::scope(|s| {
         s.spawn(move || {*/
@@ -60,6 +56,7 @@ fn main() {
     });*/
 }
 fn args() -> Result<(IpAddr, u16), Box<dyn Error>> {
+    //TODO: Make all the panics in this function (return only (IpAddr, u16))
     let args: Vec<String> = std::env::args().collect();
     let ip: IpAddr;
     let port: u16;

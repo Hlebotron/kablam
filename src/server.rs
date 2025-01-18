@@ -235,8 +235,8 @@ pub mod Server {
         pub fn opcode(&self) -> Opcode {
             self.opcode
         }
-        pub fn mask(&self) -> &Option<Vec<u8>> {
-            &self.mask
+        pub fn mask(&self) -> Option<&Vec<u8>> {
+            self.mask.as_ref()
         }
         pub fn bytes(&self) -> Vec<u8> {
             self.content.to_vec()
