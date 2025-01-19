@@ -46,18 +46,44 @@ pub mod game {
         pub fn attr_num(&self) -> &HashMap<AttrNum, usize> {
             &self.attributes_num
         }
-        /*pub fn rm_attr(&mut self, attr: &Attribute) -> bool {
-            self.attributes.remove(attr) 
+        /*fn mod_attr_ref<T, A, N>(&mut self, attr: &Attribute, fn_attr: A, fn_attr_num: N) -> T
+            where
+                A: Fn(&mut Self, &Attribute) -> T,
+                N: Fn(&mut Self, &AttrNum) -> T
+        {
+            let attr_num_res = attr.try_num(self.config.clone());
+            match attr_num_res {
+                Some(attr_num) => fn_attr_num(self, &attr_num),
+                None => fn_attr(self, attr)
+            }
+        }
+        fn mod_attr<T, A, N>(&mut self, attr: Attribute, fn_attr: A, fn_attr_num: N) -> T
+            where
+                A: Fn(&mut Self, Attribute) -> T,
+                N: Fn(&mut Self, AttrNum) -> T
+        {
+            let attr_num_res = attr.try_num(self.config.clone());
+            match attr_num_res {
+                Some(attr_num) => fn_attr_num(self, attr_num),
+                None => fn_attr(self, attr)
+            }
         }*/
         pub fn has_attr(&self, attr: &Attribute) -> bool {
-            self.attributes.contains(attr)
+            let attr_num_res = attr.try_num(self.config.clone());
+            match attr_num_res {
+                Some(attr_num) => self.has_attr_num(&attr_num),
+                None => self.attr().contains(attr)
+            }
+        }
+        pub fn has_attr_num(&self, attr: &AttrNum) -> bool {
+            self.attributes_num.contains_key(attr)
         }
         pub fn add_attr(&mut self, attr: Attribute) {
-            let from_res = AttrNum::try_from(&attr);
-            match from_res {
-                Err(_) => { self.attributes.insert(attr); },
-                Ok(attr_num) => { self.add_attr_num(attr_num); }
-            };
+            let attr_num_res = attr.try_num(self.config.clone());
+            match attr_num_res {
+                Some(attr_num) => { self.add_attr_num(attr_num); }
+                None => { self.attributes.insert(attr); }
+            }
         }
         pub fn add_attr_num(&mut self, attr: AttrNum) {
             let mut attrs = &mut self.attributes_num;
@@ -65,6 +91,13 @@ pub mod game {
                 *val += 1;
             } else {
                 attrs.insert(attr, 1); 
+            }
+        }
+        pub fn rm_attr(&mut self, attr: &Attribute) -> bool {
+            let from_res = attr.try_num(self.config.clone());
+            match from_res {
+                Some(attr_num) => self.rm_attr_num(&attr_num).is_some(),
+                None => self.attributes.remove(attr)
             }
         }
         pub fn rm_attr_num(&mut self, attr: &AttrNum) -> Option<usize> {
@@ -78,16 +111,6 @@ pub mod game {
                 return Some(0);
             }
             Some(*count)
-        }
-        pub fn rm_attr(&mut self, attr: &Attribute) -> bool {
-            let from_res = AttrNum::try_from(attr);
-            match from_res {
-                Err(_) => self.attributes.remove(attr),
-                Ok(attr_num) => self.rm_attr_num(&attr_num).is_some()
-            }
-        }
-        pub fn has_attr_num(&self, attr: &AttrNum) -> bool {
-            self.attributes_num.contains_key(attr)
         }
         pub fn pull_card(&mut self, deck: &mut Deck, default: &CardPile) -> (Card, Suit, Rank) {
             let tuple = deck.rm_card(default);
@@ -170,6 +193,18 @@ pub mod game {
                 upper_hand: Vec::new(),
                 config: None,
             }
+        }
+    }
+    impl Attribute {
+        pub fn try_num(&self, config: Option<&Config>) -> Option<AttrNum> {
+            if let None = config {
+                return AttrNum::try_from(self).ok();
+            }
+            let allowed_attrs = &config?.num_attrs;
+            let attr = allowed_attrs
+                .iter()
+                .find(|x| x == &self)?;
+            AttrNum::try_from(attr).ok()
         }
     }
     pub struct Deck {
@@ -283,7 +318,7 @@ pub mod game {
         Renegade
     }
     #[repr(u8)]
-    #[derive(Eq, Hash, PartialEq)]
+    #[derive(Eq, Hash, PartialEq, Debug)]
     pub enum Attribute {
         Barrel,
         Jailed,
@@ -497,14 +532,20 @@ mod tests {
     #[test]
     fn attributes() {
         let mut player = Player::default();  
+        dbg!(player.attr_num());
+        dbg!(player.attr());
         assert!(player.attr().len() == 0);
         assert!(player.attr_num().len() == 0);
 
         player.add_attr(Jailed);
+        dbg!(player.attr_num());
+        dbg!(player.attr());
         assert!(player.attr().len() == 1);
         assert!(player.attr_num().len() == 0);
 
         player.add_attr(ExtraRange);
+        dbg!(player.attr_num());
+        dbg!(player.attr());
         assert!(player.attr().len() == 1);
         assert!(player.attr_num().len() == 1);
 
@@ -515,7 +556,6 @@ mod tests {
         player.add_attr(ExtraDistance);
         assert!(player.attr().len() == 1);
         assert!(player.attr_num().len() == 2);
-
         {
             let res = player.rm_attr(&Dynamite);
             assert!(player.attr().len() == 1);
@@ -538,6 +578,15 @@ mod tests {
             dbg!(player.attr_num());
             assert!(player.attr().len() == 0);
             assert!(player.attr_num().len() == 1);
+            assert!(res == true);
+        }{
+            let res = player.has_attr(&ExtraRange);
+            assert!(res == false);
+        }{
+            let res = player.has_attr(&Dynamite);
+            assert!(res == false);
+        }{
+            let res = player.has_attr(&ExtraDistance);
             assert!(res == true);
         }
     }
