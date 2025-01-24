@@ -549,7 +549,9 @@ pub mod game {
         Some(index)
     }
     pub fn start_game(tx: Sender<GameAction>, rx: Receiver<PlayerAction>) {
+        while let Some(action) = rx.receive() {
 
+        }
     }
 }
 #[cfg(test)]
