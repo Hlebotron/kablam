@@ -4,7 +4,7 @@ pub mod Server {
         str::FromStr,
         error::Error,
         sync::{
-            mpsc,
+            mpsc::*,
             Arc,
             Mutex,
         },
@@ -38,18 +38,23 @@ pub mod Server {
     pub type Answer = Response<Cursor<Vec<u8>>>;
     type Socket = Box<dyn ReadWrite + Send>;
 
+    use crate::game::game::{
+        PlayerAction::{self, *},
+        GameAction::{self, *},
+    };
+
     use Opcode::*;
     pub struct ThreadPool {
         workers: Vec<Worker>,
         limit: Option<usize>,
-        sender: mpsc::Sender<Job>
+        sender: Sender<Job>
     }
     struct Worker {
         id: usize,
         handle: Option<JoinHandle<()>>,
     }
     impl Worker {
-        pub fn new(id: usize, rx: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+        pub fn new(id: usize, rx: Arc<Mutex<Receiver<Job>>>) -> Worker {
             let handle = thread::spawn(move || loop {
                 let res = rx.lock().unwrap().recv();
                 match res {
@@ -73,7 +78,7 @@ pub mod Server {
     impl ThreadPool {
         pub fn new(amount: usize, limit: Option<usize>) -> Result<ThreadPool, String> {
             let mut workers: Vec<Worker> = Vec::with_capacity(amount);
-            let (tx, rx) = mpsc::channel::<Job>();
+            let (tx, rx) = channel::<Job>();
             let rx = Arc::new(Mutex::new(rx));
             for id in 0..amount {
                 let worker = Worker::new(id, rx.clone());
@@ -427,5 +432,104 @@ pub mod Server {
             _ => (127, size.to_be_bytes().to_vec())
         };
         (len_len, len)
+    }
+    pub fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool, tx: Sender<PlayerAction>, rx: Receiver<GameAction>) -> Result<(), ServerError> {
+        let address = format!("{}:{}", &ip, &port);
+        let server = Server::http(address)?;
+        let pool1 = Arc::new(pool);
+        let pool2 = pool1.clone();
+        let (tx_rp, rx_rp) = channel::<(Request, Answer, bool)>();
+        thread::scope(move |s| {
+            s.spawn(move || {
+                println!("Started server: {}:{}", &ip, &port);
+                for request in server.incoming_requests() {
+                    println!("I: {} {}", request.method(), request.url());
+                    let tx_th = tx_rp.clone();
+                    let job = Box::new(move || process_request(request, tx_th));
+                    pool1.execute(job);
+                }
+            });
+            s.spawn(move || {
+                for (request, response, is_ws) in rx_rp.into_iter() {
+                    if !is_ws {
+                        request.respond(response);
+                        continue;
+                    }                    
+                    let mut stream = Stream::new(
+                        request.upgrade("websocket", response),
+                        Duration::from_secs(5)
+                    );
+                    let job = Box::new(move || handle_ws(stream));
+                    pool2.execute(job);
+                } 
+            });
+        });
+        Ok(())
+    }
+    pub fn handle_ws(mut stream: Stream) {
+        /*
+        thread::scope(|s| {
+            let (tx, rx) = mpsc::channel::<String>();
+            let stream1 = Arc::new(Mutex::new(stream));
+            let stream2 = stream1.clone();
+            s.spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    println!("pog");
+                    let msg = rx.try_recv();
+                    if let Ok(message) = msg {
+                        println!("{}", message);
+                    }
+                    let mut stream_locked = stream1.lock().expect("Could not lock onto stream");
+                    let res = stream_locked.write(&[0b10000001, 3, 97, 98, 99]);
+                    stream_locked.flush();
+                    if let Err(_) = res {
+                        println!("Disconnected (write)");
+                        break;
+                    }
+                }
+            });
+            s.spawn(move || {
+                loop {
+                }
+            });
+        });*/
+        loop {
+            let frame = stream.get_frame(); 
+            let content = frame.bytes();
+            match frame.opcode() {
+                Fragment => println!("fragment"),
+                Text => {
+                    let text = frame.text().expect("Those bastards lied about UTF-8");
+                    println!("{}", text);
+                }
+                Binary => println!("data"),
+                Close => {
+                    println!("Closing");
+                    stream.close(frame);
+                    break;
+                },
+                Ping => {
+                    println!("Received Ping; responding");
+                    stream.pong(&content, 1024);
+                },
+                Pong => println!("Received Pong: {:?}", content),
+                Unknown => println!("Unknown")
+            }
+            let mut buf: Vec<u8> = Vec::new();
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    pub fn process_request(mut request: Request, tx: Sender<(Request, Answer, bool)>) {
+        let is_ws = check_ws(&request);
+        let response = match (request.method(), request.url()) {
+            (Get, "/") => Response::from_string("pog"),
+            (Get, "/ws") => match is_ws {
+                true => get_upgrade_response(&request),
+                false => Response::from_string("Invalid"),
+            }
+            _ => Response::from_string("Invalid"),
+        };
+        tx.send((request, response, is_ws));
     }
 }

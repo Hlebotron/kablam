@@ -5,16 +5,14 @@ pub mod game {
         ops::Index,
         thread,
         time::Duration,
+        sync::mpsc::{Receiver, Sender},
     };
     use rand::{thread_rng, Rng};
     use crate::setup;
     type CardPile = Vec<(Card, Vec<(Suit, Rank)>)>;
-    impl Player {
-        pub fn new(character: Character, role: Role, extra_attrs: Option<HashSet<Attribute>>, config: Option<&'static Config>) -> Player {
-            let mut attributes = match extra_attrs {
-                Some(hashset) => hashset,
-                None => HashSet::<Attribute>::new()
-            };
+    impl Player<'_> {
+        pub fn new<'a>(character: Character, role: Role, config: Option<&Config>, extra_attrs: Option<Vec<Attribute>>) -> Player {
+            let mut attributes: HashSet<Attribute> = HashSet::new();
             let health = match &character {
                 Character::ElGringo | Character::PaulRegret => {
                     attributes.insert(Attribute::LoweredMaxHealth); 
@@ -22,7 +20,7 @@ pub mod game {
                 },
                 _ => 4
             };
-            Player {
+            let mut player = Player {
                 health: health,
                 weapon: Weapon::Colt45,
                 attributes: attributes,
@@ -32,7 +30,17 @@ pub mod game {
                 lower_hand: Vec::new(),
                 upper_hand: Vec::new(),
                 config: config,
+            };
+            if let Some(vec) = extra_attrs {
+                for x in vec {
+                    let attr_num_res = x.try_num(config.clone());
+                    match attr_num_res {
+                        Some(attr_num) => { player.add_attr_num(attr_num); }
+                        None => { player.attributes.insert(x); }
+                    }
+                };
             }
+            player
         }
         pub fn health(&self) -> usize {
             self.health
@@ -178,8 +186,11 @@ pub mod game {
         pub fn lower_hand(&mut self) -> &mut Vec<LowerCard> {
             &mut self.lower_hand
         }
+        pub fn config(&self) -> Option<&Config> {
+            self.config.clone()
+        }
     }
-    impl Default for Player {
+    impl Default for Player<'_> {
         fn default() -> Self {
             use Attribute::*;
             Player {
@@ -197,10 +208,13 @@ pub mod game {
     }
     impl Attribute {
         pub fn try_num(&self, config: Option<&Config>) -> Option<AttrNum> {
-            if let None = config {
+            if let None = &config {
                 return AttrNum::try_from(self).ok();
             }
-            let allowed_attrs = &config?.num_attrs;
+            if let None = &config?.num_attrs() {
+                return AttrNum::try_from(self).ok();
+            }
+            let allowed_attrs = config?.num_attrs()?;
             let attr = allowed_attrs
                 .iter()
                 .find(|x| x == &self)?;
@@ -335,10 +349,10 @@ pub mod game {
         PullFromDiscard,
         Discard2Heal,
         DoubleMissed,
-        NoCardPull,
+        RunOutPull,
         KillStealCards,
         NoBangLimit,
-        SecondPullShowGamble,
+        SecondPullGamble,
     }
     #[repr(u8)]
     #[derive(Eq, Hash, PartialEq, Debug)]
@@ -373,7 +387,19 @@ pub mod game {
         King,
         Ace
     }
-    pub struct Player {
+    #[derive(Clone, Copy)]
+    pub enum PlayerAction {
+        PlayCard(usize),
+        ActivateCard(usize),
+        Choose(usize),
+        PullCard,
+    }
+    #[derive(Clone, Copy)]
+    pub enum GameAction {
+        Choose,
+
+    }
+    pub struct Player<'a> {
         health: usize,
         weapon: Weapon,
         attributes: HashSet<Attribute>,
@@ -382,15 +408,25 @@ pub mod game {
         role: Role,
         lower_hand: Vec<LowerCard>,
         upper_hand: Vec<Card>,
-        config: Option<&'static Config>,
+        config: Option<&'a Config>,
     }  
     pub struct Config {
-        num_attrs: HashSet<Attribute>
+        num_attrs: Option<HashSet<Attribute>>
     }
     impl Config {
-        pub fn new(num_attrs: HashSet<Attribute>) -> Self {
+        pub fn new(num_attrs: Option<HashSet<Attribute>>) -> Self {
             Config {
                 num_attrs: num_attrs,
+            }
+        }
+        pub fn num_attrs(&self) -> Option<&HashSet<Attribute>> {
+            self.num_attrs.as_ref()
+        }
+    }
+    impl Default for Config {
+        fn default() -> Self {
+            Config {
+                num_attrs: None
             }
         }
     }
@@ -439,7 +475,7 @@ pub mod game {
                 CalamityJanet => Self::BangMissSwap,
                 ElGringo => Self::HitStealCard,
                 BartCassidy => Self::HitPullCard,
-                BlackJack => Self::SecondPullShowGamble,
+                BlackJack => Self::SecondPullGamble,
                 JesseJones => Self::PullStealCard,
                 Jourdannais => Self::Barrel,
                 KitCarlson => Self::HitStealCard,
@@ -449,7 +485,7 @@ pub mod game {
                 RoseDoolan => Self::ExtraRange,
                 SidKetchum => Self::Discard2Heal,
                 SlabTheKiller => Self::DoubleMissed,
-                SuzyLafayette => Self::NoCardPull,
+                SuzyLafayette => Self::RunOutPull,
                 VultureSam => Self::KillStealCards,
                 WillyTheKid => Self::NoBangLimit,
             }
@@ -508,16 +544,18 @@ pub mod game {
         }
     }
     fn rng(range: std::ops::Range<usize>) -> Option<usize> {
-        if range.is_empty() {
-            return None;
-        }
+        if range.is_empty() { return None; }
         let index: usize = thread_rng().gen_range(range);
         Some(index)
+    }
+    pub fn start_game(tx: Sender<GameAction>, rx: Receiver<PlayerAction>) {
+
     }
 }
 #[cfg(test)]
 mod tests {
-    use crate::{Player, Character::*, Role::*, Deck, Attribute::*};
+    use crate::{Player, Character::*, Role::*, Deck, Attribute::*, Config};
+    use std::collections::HashSet;
     
     #[test]
     fn pull_card() {
@@ -531,7 +569,18 @@ mod tests {
 
     #[test]
     fn attributes() {
-        let mut player = Player::default();  
+        let config = Config::new(Some(HashSet::from([ExtraRange, Barrel])));
+        let player = Player::new(CalamityJanet, Sheriff, Some(&config), None);
+        attributes_test(player)
+    }
+
+    //#[test]
+    //fn attributes_default() {
+    //    let player = Player::default();
+    //    attributes_test(player)
+    //}
+
+    fn attributes_test(mut player: Player) {
         dbg!(player.attr_num());
         dbg!(player.attr());
         assert!(player.attr().len() == 0);
@@ -550,34 +599,41 @@ mod tests {
         assert!(player.attr_num().len() == 1);
 
         player.add_attr(ExtraRange);
+        dbg!(player.attr_num());
+        dbg!(player.attr());
         assert!(player.attr().len() == 1);
         assert!(player.attr_num().len() == 1);
 
         player.add_attr(ExtraDistance);
-        assert!(player.attr().len() == 1);
-        assert!(player.attr_num().len() == 2);
+        dbg!(player.attr_num());
+        dbg!(player.attr());
+        assert!(player.attr().len() == 2);
+        assert!(player.attr_num().len() == 1);
         {
             let res = player.rm_attr(&Dynamite);
-            assert!(player.attr().len() == 1);
-            assert!(player.attr_num().len() == 2);
+            assert!(player.attr().len() == 2);
+            assert!(player.attr_num().len() == 1);
             assert!(res == false);
         }{ 
             let res = player.rm_attr(&Jailed);
-            assert!(player.attr().len() == 0);
-            assert!(player.attr_num().len() == 2);
-            assert!(res == true);
-        }{ 
-            dbg!(player.attr_num());
-            let res = player.rm_attr(&ExtraRange);
-            dbg!(player.attr_num());
-            assert!(player.attr().len() == 0);
-            assert!(player.attr_num().len() == 2);
-            assert!(res == true);
-        }{ 
-            let res = player.rm_attr(&ExtraRange);
-            dbg!(player.attr_num());
-            assert!(player.attr().len() == 0);
+            assert!(player.attr().len() == 1);
             assert!(player.attr_num().len() == 1);
+            assert!(res == true);
+        }{ 
+            dbg!(player.attr_num());
+            let res = player.rm_attr(&ExtraRange);
+            dbg!(player.attr_num());
+            assert!(player.attr().len() == 1);
+            assert!(player.attr_num().len() == 1);
+            assert!(res == true);
+        }{ 
+            let res = player.has_attr(&ExtraRange);
+            assert!(res == true);
+        }{
+            let res = player.rm_attr(&ExtraRange);
+            dbg!(player.attr_num());
+            assert!(player.attr().len() == 1);
+            assert!(player.attr_num().len() == 0);
             assert!(res == true);
         }{
             let res = player.has_attr(&ExtraRange);
