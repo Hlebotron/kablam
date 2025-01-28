@@ -1,3 +1,5 @@
+#cargo-features = ["mpmc_channel"]
+
 [package]
 name = "bang_web"
 version = "0.1.0"
@@ -6,7 +8,8 @@ edition = "2021"
 [dependencies]
 local-ip-address = "0.6.2"
 serde = {version = "1.0.210", features = ["derive"]}
-tiny_http = {version = "0.12.0", features = ["ssl-openssl"]}
+#tiny_http = {version = "0.12.0", features = ["ssl-openssl"]}
+tiny_http = "0.12.0"
 toml = "0.8.19"
 rust-crypto = "0.2.36"
 base64 = "0.22.1"

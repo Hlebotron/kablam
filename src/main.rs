@@ -1,3 +1,4 @@
+#![feature(mpmc_channel)]
 use std::{
     net::IpAddr,
     str::FromStr,
@@ -5,7 +6,7 @@ use std::{
     thread,
     time::Duration,
     sync::{
-        mpsc,
+        mpmc,
         Arc,
         Mutex,
     },
@@ -18,7 +19,8 @@ type ServerError = Box<dyn Error + Send + Sync + 'static>;
 use tiny_http::{Request, Server, Response, Method::*};
 
 pub mod server;
-use server::Server::{
+#[doc(inline)]
+use server::{
     *,
     Opcode::*,
 };
@@ -26,19 +28,19 @@ use server::Server::{
 pub mod setup;
 
 pub mod game;
-use game::game::*;
+use game::*;
 
 fn main() {
-    let ip_port_res = args();
-    let (ip, port) = match ip_port_res {
-        Err(_) => panic!("USAGE:\n\tcargo run [IP Address] <Port>\n"),
-        Ok((arg1, arg2)) => (arg1, arg2) 
-    };
-    println!("Press CONTROL-C to exit");
+    let (ip, port) = args();
+    println!(r#"Press CONTROL-C to exit
+Legend:
+I - Info
+E - Error
+"#);
     let server_tp = ThreadPool::new(10, Some(10)).unwrap();
     let ws_tp = ThreadPool::new(0, None).unwrap();
-    let (tx_game, rx_server) = mpsc::channel::<GameAction>();
-    let (tx_server, rx_game) = mpsc::channel::<PlayerAction>();
+    let (tx_game, rx_server) = mpmc::channel::<GameAction>();
+    let (tx_server, rx_game) = mpmc::channel::<PlayerAction>();
     thread::scope(|s| {
         s.spawn(move || {
             run_server(ip, port, server_tp, ws_tp, tx_server, rx_server);
@@ -60,21 +62,28 @@ fn main() {
         });*/
     });
 }
-fn args() -> Result<(IpAddr, u16), Box<dyn Error>> {
-    //TODO: Make all the panics in this function (return only (IpAddr, u16))
+fn args() -> (IpAddr, u16) {
     let args: Vec<String> = std::env::args().collect();
-    let ip: IpAddr;
-    let port: u16;
-    match args.len() {
+    let ip: Option<IpAddr>;
+    let port: Option<u16>;
+    let res = match args.len() {
         2 => {
-            port = args[1].parse()?; 
-            ip = local_ip()?;
+            port = args[1].parse().ok(); 
+            ip = local_ip().ok();
+            (ip, port)
         }
         3 => {
-            port = args[2].parse()?; 
-            ip = IpAddr::from_str(&args[1])?;
+            port = args[2].parse().ok(); 
+            ip = IpAddr::from_str(&args[1]).ok();
+            (ip, port)
         }
         _ => panic!("USAGE:\n\tcargo run [IP Address] <Port>\n")
+    };
+    if let None = &res.0 {
+        panic!("Invalid port, please enter a u16 (0 to 65535)"); 
     }
-    Ok((ip, port))
+    if let None = &res.1 {
+        panic!("Invalid IP address, please following this format: {{u8}}.{{u8}}.{{u8}}.{{u8}}"); 
+    }
+    (res.0.unwrap(), res.1.unwrap())
 }
