@@ -1,7 +1,5 @@
-#![feature(mpmc_channel)]
 use std::{
     net::IpAddr,
-    str::FromStr,
     error::Error,
     sync::{
         mpsc::*,
@@ -16,6 +14,7 @@ use std::{
     //collections::HashMap,
     fmt::{ Display, Formatter },
 };
+use crate::*;
 use tiny_http::{
     Server,
     Request,
@@ -28,7 +27,6 @@ use tiny_http::{
 use crypto::sha1::Sha1;
 use crypto::digest::Digest;
 use base64::prelude::*;
-use local_ip_address::local_ip;
 use base16;
 //use getch_rs::{ Getch, Key::* };
 ///Function to execute for a `ThreadPool`
@@ -66,12 +64,12 @@ impl Worker {
             let res = rx.lock().unwrap().recv();
             match res {
                 Ok(job) => {
-                    println!("I: Worker {} executing job", id); 
+                    i!("Worker {} executing job", id); 
                     job(); 
-                    println!("I: Worker {} done", id);
+                    i!("Worker {} done", id);
                 }
                 Err(_) => {
-                    println!("I: Worker {} shutting down", id); 
+                    e!("I: Worker {} shutting down", id); 
                     break;
                 }
             }
@@ -117,7 +115,7 @@ impl ThreadPool {
                 let handle = thread::spawn(|| job());
                 let worker = Worker {id: *id, handle: Some(handle)};
             }
-            _ => println!("E: Pool max size reached"),
+            _ => e!("Pool max size reached"),
         }
     }
 }
@@ -346,6 +344,50 @@ impl Stream {
         }
         Frame::new(fin, rsv1, rsv2, rsv3, opcode, mask, content)
     }
+    pub fn try_get_frame(&mut self) -> Option<Frame> {
+        let control_bytes: Vec<u8> = self.try_read_n(2)?;
+        let control_bits1 = into_bits(control_bytes[0]);
+        let fin = control_bits1[0];
+        let rsv1 = control_bits1[1];
+        let rsv2 = control_bits1[2];
+        let rsv3 = control_bits1[3];
+        let opcode = Opcode::from(from_bits(&control_bits1[4..8]));
+        let control_bits2 = into_bits(control_bytes[1]);
+        let is_masked = control_bits2[0]; 
+        let len = from_bits(&control_bits2[1..8]);
+        let real_len: u64;
+        let len_len: u8 = match len {
+            0..126 => 0,
+            126 => 2,
+            127 => 8,
+            _ => unreachable!("len > 127")
+        };
+        if len_len == 0 {
+            real_len = len as u64; 
+        } else {
+            let len_bytes: Vec<u8> = self.read_n(len_len as u64).expect("Could not get stream control content");
+            let mut buf: u64 = 0;
+            for i in 0..len_len {
+                let shift = (len_len - i - 1) * 8;
+                buf += (len_bytes[i as usize] as u64) << shift as u64;
+            }
+            real_len = buf;
+        }
+        let mask: Option<Vec<u8>> = match is_masked {
+            false => None,
+            true => {
+                let res = self.read_n(4).expect("Could not get stream control content");
+                Some(res)
+            },
+        };
+        let mut content = self.read_n(real_len).expect("Could not get stream control content");
+        if let Some(key) = &mask { 
+            for i in 0..content.len() {
+                content[i] = content[i] ^ key[i % 4];
+            }
+        }
+        Some(Frame::new(fin, rsv1, rsv2, rsv3, opcode, mask, content))
+    }
     ///Write the `Frame` to the `Stream`.
     pub fn write_frame(&mut self, frame: Frame) {
         let mut byte1: u8 = 0;
@@ -397,12 +439,12 @@ impl Stream {
         self.write_all(len.as_slice());
         self.write_all(content);
         self.flush();
-        println!("I: Sent Ping: {:?}", content);
+        i!("Sent Ping: {:?}", content);
         let frame = self.get_frame();
         if let Pong = frame.opcode() {
-            println!("I: Received Pong: {:?}", frame.bytes());
+            i!("Received Pong: {:?}", frame.bytes());
         } else {
-            println!("I: Received other frame: {}", frame);
+            i!("Received other frame: {}", frame);
         }
     }
     ///Get a mutable reference of the inner `Socket`.
@@ -416,18 +458,32 @@ impl Stream {
     ///Read an N amount of bytes from the `Stream`.
     ///
     ///NOTE: This function will block until it receives a frame.
-    pub fn read_n(&mut self, bytes: u64) -> Result<Vec<u8>, String> {
+    pub fn read_n(&mut self, bytes: u64) -> Option<Vec<u8>> {
         if bytes == 0 {
-            return Ok(Vec::<u8>::new());
+            return Some(Vec::<u8>::new());
         }
         let mut buf: Vec<u8> = Vec::with_capacity(bytes as usize);
         let read = self
             .take(bytes as u64)
             .read_to_end(&mut buf);
         match read {
-            Ok(0) => Err("Could not read anything".to_string()),
-            Ok(n) => Ok(buf),
-            Err(err) => Err(err.to_string())
+            Ok(0) => None,
+            Ok(n) => Some(buf),
+            Err(err) => None
+        }
+    }
+    pub fn try_read_n(&mut self, bytes: u64) -> Option<Vec<u8>> {
+        if bytes == 0 {
+            return Some(Vec::<u8>::new());
+        }
+        let mut buf: Vec<u8> = Vec::with_capacity(bytes as usize);
+        let read = self
+            .take(bytes as u64)
+            .read_to_end(&mut buf);
+        match read {
+            Ok(0) => None,
+            Ok(n) => Some(buf),
+            Err(err) => None
         }
     }
 }
@@ -479,7 +535,7 @@ fn set_len(size: u64) -> (u8, Vec<u8>) {
 ///Start a server with the specifications in the args.
 ///
 ///NOTE: This is a blocking function and is not meant to return.
-pub fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool, mut tx: mpmc::Sender<PlayerAction>, rx: mpmc::Receiver<GameAction>) -> Result<(), ServerError> {
+pub fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool, tx: mpmc::Sender<PlayerAction>, rx: mpmc::Receiver<GameAction>) -> Result<(), ServerError> {
     let address = format!("{}:{}", &ip, &port);
     let server = Server::http(address)?;
     let pool1 = Arc::new(pool);
@@ -487,9 +543,9 @@ pub fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool, 
     let (tx_response, rx_response) = channel::<(Request, Answer, bool)>();
     thread::scope(move |s| {
         s.spawn(move || {
-            println!("I: Started server: {}:{}", &ip, &port);
+            i!("Started server: {}:{}", &ip, &port);
             for request in server.incoming_requests() {
-                println!("I: {} {}", request.method(), request.url());
+                i!("{}: {}", request.method(), request.url());
                 let tx_th = tx_response.clone();
                 let job = Box::new(move || process_request(request, tx_th));
                 pool1.execute(job);
@@ -498,12 +554,12 @@ pub fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool, 
         s.spawn(move || {
             for (request, response, is_ws) in rx_response.into_iter() {
                 let rx_inner = rx.clone();
-                let mut tx_inner = tx.clone();
+                let tx_inner = tx.clone();
                 if !is_ws {
                     request.respond(response);
                     continue;
                 }                    
-                let mut stream = Stream::new(
+                let stream = Stream::new(
                     request.upgrade("websocket", response),
                     Duration::from_secs(5)
                 );
@@ -515,23 +571,23 @@ pub fn run_server(ip: IpAddr, port: u16, pool: ThreadPool, ws_pool: ThreadPool, 
     Ok(())
 }
 ///Listen for WebSocket frames, handle them and respond to them accordingly.
-pub fn handle_ws(mut stream: Stream, rec: mpmc::Receiver<GameAction>, mut sender: mpmc::Sender<PlayerAction>) {
+pub fn handle_ws(stream: Stream, rec: mpmc::Receiver<GameAction>, sender: mpmc::Sender<PlayerAction>) {
+    //TODO: Message system
+    //When a write needs to be made, the write thread sends a message to the other thread to unlock
+    //the stream, then waits for it to be unlocked
     thread::scope(|s| {
-        let (tx, rx) = channel::<String>();
         let stream1 = Arc::new(Mutex::new(stream));
         let stream2 = stream1.clone();
         s.spawn(move || {
             loop {
                 thread::sleep(Duration::from_secs(1));
-                let msg = rx.try_recv();
-                if let Ok(message) = msg {
-                    println!("I: {}", message);
-                }
+                let msg = rec.recv();
+                //i!("Message: {}", message);
                 let mut stream_locked = stream1.lock().expect("Could not lock onto stream (write)");
                 let res = stream_locked.write(&[0b10000001, 3, 97, 98, 99]);
                 stream_locked.flush();
                 if let Err(_) = res {
-                    println!("E: Disconnected (write)");
+                    e!("Disconnected (write)");
                     break;
                 }
             }
@@ -539,30 +595,35 @@ pub fn handle_ws(mut stream: Stream, rec: mpmc::Receiver<GameAction>, mut sender
         s.spawn(move || {
             loop {
                 let mut stream_locked = stream2.lock().expect("Could not get access to stream (read)");
-                let frame = stream_locked.get_frame(); 
+                let frame_res = stream_locked.try_get_frame(); 
+                if let None = &frame_res {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                let frame = frame_res.unwrap();
                 let content = frame.bytes();
                 match frame.opcode() {
                     Fragment => println!("fragment"),
                     Text => {
                         let text = frame.text().expect("Those bastards lied about UTF-8");
-                        println!("I: {}", text);
+                        i!("Text: {}", text);
                     }
                     Binary => println!("data"),
                     Close => {
-                        println!("I: Closing");
+                        i!("Closing");
                         let mut stream_locked = stream2.lock().expect("Could not write to stream (write, close)");
                         stream_locked.close(frame);
                         break;
                     },
                     Ping => {
-                        println!("I: Received Ping; responding");
+                        i!("Received Ping; responding");
                         let mut stream_locked = stream2.lock().expect("Could not write to stream (write, pong)");
                         stream_locked.pong(&content, 1024);
                     },
-                    Pong => println!("I: Received Pong: {:?}", content),
-                    Unknown => println!("E: Unknown")
+                    Pong => i!("Received Pong: {:?}", content),
+                    Unknown => e!("Unknown")
                 }
-                let mut buf: Vec<u8> = Vec::new();
+                let buf: Vec<u8> = Vec::new();
                 thread::sleep(Duration::from_secs(1));
             }
         });
@@ -572,7 +633,7 @@ pub fn handle_ws(mut stream: Stream, rec: mpmc::Receiver<GameAction>, mut sender
 ///
 ///The request itself, the response and if the request is a WebSocket request will be sent
 ///using the sender.
-pub fn process_request(mut request: Request, tx: Sender<(Request, Answer, bool)>) {
+pub fn process_request(request: Request, tx: Sender<(Request, Answer, bool)>) {
     let is_ws = check_ws(&request);
     let response = match (request.method(), request.url()) {
         (Get, "/") => Response::from_string("pog"),

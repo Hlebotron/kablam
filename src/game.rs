@@ -1,16 +1,11 @@
-#![feature(mpmc_channel)]
 use std::{
     convert::{ TryFrom, From },
     collections::{ HashSet, HashMap },
-    ops::Index,
-    thread,
-    time::Duration,
     sync::{
         mpmc::{ Receiver, Sender },
     },
 };
 use rand::{thread_rng, Rng};
-use crate::setup;
 type CardPile = Vec<(Card, Vec<(Suit, Rank)>)>;
 impl Player<'_> {
     pub fn new<'a>(character: Character, role: Role, config: Option<&Config>, extra_attrs: Option<Vec<Attribute>>) -> Player {
@@ -56,6 +51,8 @@ impl Player<'_> {
     pub fn attr_num(&self) -> &HashMap<AttrNum, usize> {
         &self.attributes_num
     }
+
+    //What did I achieve with these 2 functions? Absolutely nothing.
     /*fn mod_attr_ref<T, A, N>(&mut self, attr: &Attribute, fn_attr: A, fn_attr_num: N) -> T
         where
             A: Fn(&mut Self, &Attribute) -> T,
@@ -96,7 +93,7 @@ impl Player<'_> {
         }
     }
     pub fn add_attr_num(&mut self, attr: AttrNum) {
-        let mut attrs = &mut self.attributes_num;
+        let attrs = &mut self.attributes_num;
         if let Some(val) = attrs.get_mut(&attr) {
             *val += 1;
         } else {
@@ -112,7 +109,7 @@ impl Player<'_> {
     }
     pub fn rm_attr_num(&mut self, attr: &AttrNum) -> Option<usize> {
         let attrs = &mut self.attributes_num;
-        let mut count = attrs.get_mut(&attr)?;
+        let count = attrs.get_mut(&attr)?;
         if *count > 0 {
             *count -= 1; 
         }
@@ -194,7 +191,7 @@ impl Player<'_> {
 }
 impl Default for Player<'_> {
     fn default() -> Self {
-        use Attribute::*;
+        
         Player {
             health: 4,
             weapon: Weapon::Colt45,
@@ -235,7 +232,7 @@ impl Deck {
         let rng1 = rng(0..len).expect("Vec should not be empty");
         let selection = self.inner.get_mut(rng1).unwrap();
         let card = selection.0.clone();
-        let mut vec = &mut selection.1;
+        let vec = &mut selection.1;
         let rng2 = rng(0..vec.len()).expect("Vec should not be empty");
         let (suit, rank) = vec.swap_remove(rng2); 
         if vec.len() > 0 {
@@ -399,6 +396,10 @@ pub enum PlayerAction {
 #[derive(Clone, Copy)]
 pub enum GameAction {
     Choose,
+    Event(Event),
+}
+#[derive(Clone, Copy)]
+pub enum Event {
 
 }
 pub struct Player<'a> {
@@ -550,7 +551,7 @@ fn rng(range: std::ops::Range<usize>) -> Option<usize> {
     let index: usize = thread_rng().gen_range(range);
     Some(index)
 }
-pub fn start_game(mut tx: Sender<GameAction>, rx: Receiver<PlayerAction>) { while let Ok(action) = rx.recv() {
+pub fn start_game(tx: Sender<GameAction>, rx: Receiver<PlayerAction>) { while let Ok(action) = rx.recv() {
     println!("action");
 }}
 
