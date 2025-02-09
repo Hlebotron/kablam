@@ -26,7 +26,7 @@ pub mod game;
 use game::*;
 
 fn main() {
-    Server::start("192.168.1.170:6969").expect("jog");
+    Server::start("192.168.1.133:6969").expect("jog");
     let (ip, port) = args();
     println!("Press CONTROL-C to exit\nLegend:\n  \x1b[32m|\x1b[0m - Info\n  \x1b[101m \x1b[0m - Error\n  \x1b[103m \x1b[0m - Warning");
     thread::sleep(std::time::Duration::from_secs(1));
